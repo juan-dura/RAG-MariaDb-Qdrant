@@ -4,32 +4,40 @@ import os
 import pymysql
 import logging
 from app.config import Config
-from app.document import Document
+from app.classes.document import Document
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, MultiVectorComparator, MultiVectorConfig
 
 @dataclass
-class Documento:
+class DocumentRecord:
     """
-        Data class representing a document record in the database.
+        Data class representing a document record in the dataMariaDbbase.
     """
-    id: int
+    id: Union[int, None]
     doc_hash: str
     filename: str
     upload_path: str
     total_pages: int
     indexed_in_qdrant: bool
     created_at: Any  # Usamos Any para el tipo de fecha, podría ser datetime o str dependiendo de cómo se maneje en la base de datos
+    
+    @classmethod
+    def from_row(cls, data: Tuple) -> Union['DocumentRecord', None]:
+        """
+            Crea una instancia de DocumentRecord a partir de una tupla de datos.
+        """
+        if len(data) < 7:
+            return None  # O lanzar una excepción si prefieres  
+        return cls(
+            id=data[0],
+            doc_hash=data[1],
+            filename=data[2],
+            upload_path=data[3],
+            total_pages=data[4],
+            indexed_in_qdrant=bool(data[5]),
+            created_at=data[6]
+        )
 
-@dataclass
-class Page:
-    """
-        Data class representing a page record in the database.
-    """
-    id: int
-    document_id: int
-    page_number: int
-    content: str
 
 class Database:
     """
@@ -58,12 +66,6 @@ class Database:
             - indexed_in_qdrant: BOOLEAN DEFAULT FALSE
             - created_at: TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         
-        pages: Stores page content with foreign key to documents
-            - id: INT AUTO_INCREMENT PRIMARY KEY
-            - document_id: INT NOT NULL (FK to documents.id)
-            - page_number: INT NOT NULL
-            - content: TEXT
-    
     Qdrant Collection:
         rag_collection: Vector collection configured with ColBERT embeddings
             - Vector size: 768 dimensions
@@ -104,17 +106,6 @@ class Database:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB
         """)
-        # Crear la tabla de páginas si no existe
-        self.mariadb_cursor.execute("""
-            CREATE TABLE IF NOT EXISTS pages (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                document_id INT NOT NULL,
-                page_number INT NOT NULL,
-                content TEXT,
-                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
-                UNIQUE KEY unique_page (document_id, page_number)
-            ) ENGINE=InnoDB
-        """)
 
         self.mariadb_connection.commit()
 
@@ -152,7 +143,7 @@ class Database:
     def get_qdrant_client(self):
         return self.qdrant_client
 
-    def document_exists(self, doc_hash: str) -> Union[dict, bool]:
+    def get_document_by_hash(self, doc_hash: str) -> Union[DocumentRecord, None]:
         """
         Check if a document with the given hash exists in the documents table.
 
@@ -160,16 +151,14 @@ class Database:
             doc_hash (str): The SHA-256 hash of the document to check.
 
         Returns:
-            dict: The document row if it exists, False otherwise.
+            DocumentRecord: The document record if it exists, False otherwise.
         """
         query = "SELECT * FROM documents WHERE doc_hash = %s"
         self.mariadb_cursor.execute(query, (doc_hash,))
         result = self.mariadb_cursor.fetchone()
-        if result:
-            # Convertir la tupla a un diccionario para facilitar el acceso
-            columns = [desc[0] for desc in self.mariadb_cursor.description]
-            return dict(zip(columns, result))
-        return False
+        doc_record = DocumentRecord.from_row(result) if result else None
+        return doc_record if doc_record else None
+        
     
     def update_document_path(self, doc_hash: str, new_path: str) -> None:
         """
@@ -183,6 +172,17 @@ class Database:
         self.mariadb_cursor.execute(query, (new_path, doc_hash))
         self.mariadb_connection.commit()
 
+    def mark_document_indexed(self, doc_hash: str) -> None:
+        """
+        Mark a document as indexed in Qdrant by setting indexed_in_qdrant to True.
+
+        Args:
+            doc_hash (str): The SHA-256 hash of the document to update.
+        """
+        query = "UPDATE documents SET indexed_in_qdrant = TRUE WHERE doc_hash = %s"
+        self.mariadb_cursor.execute(query, (doc_hash,))
+        self.mariadb_connection.commit()
+        
     def insert_document(self, document: Document) -> dict:
         """
         Inserts a new document and its pages into the database.
@@ -210,26 +210,11 @@ class Database:
                     VALUES (%s, %s, %s, %s)
                 """
                 cursor.execute(query, (doc_hash, filename, upload_path, total_pages))
-                # Recuperar el ID (necesario para las páginas)
-                document_id = cursor.lastrowid
-    
-                # Insertar las páginas en la tabla pages
-                for p in range(total_pages):
-                    content = document.get_page_content(p)
-                    page_query = """                                
-                        INSERT INTO pages (document_id, page_number, content)
-                        VALUES (%s, %s, %s)
-                        ON DUPLICATE KEY UPDATE content = VALUES(content)
-                    """
-                    cursor.execute(page_query, (document_id, p, content))
-                
                 self.mariadb_connection.commit()
-        
-                resultado = {
-                    "document_id": document_id,
+                return {
+                    "document_id": cursor.lastrowid,
                     "total_pages": total_pages
                 }
-                return resultado
         except Exception as e:
             self.mariadb_connection.rollback() # Si ocurre un error, revertimos la transacción para mantener la integridad de la base de datos
             logging.error(f"Error inserting document: {e}")

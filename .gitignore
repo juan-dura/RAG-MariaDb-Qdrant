@@ -15,3 +15,7 @@ wheels/
 
 # documents
 docs_prueba/
+
+# carpetta donde se guardan los documentos procesados
+data/
+temp/

@@ -16,3 +16,6 @@ docker compose logs -f
 # Reiniciar docker de cero con borrado de volúmenes y datos
 docker compose down -v
 docker compose up -d
+
+# levantar las apis con uvicorn
+uvicorn main:app --reload --host 0.0.0.0 --port 8000

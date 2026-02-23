@@ -1,14 +1,10 @@
-import fitz
-from scipy import io
-from io import BytesIO
-from PIL import Image
-import torch
-from transformers import AutoProcessor
-from colpali_engine.models import ColPali
-from qdrant_client.models import PointStruct
-import uuid
-from app.document import Document
-from app.database import Database
+from pathlib import Path
+
+from app.classes.document import Document
+from app.classes.database import Database
+from app.classes.colpaliModel import ColPaliModel
+from app.config import Config
+from app.helpers.fill_page_number import fill_page_number
 
 class IngestionService:
     """
@@ -23,100 +19,79 @@ class IngestionService:
     def __init__(self, db: Database):
         self.db = db
 
-    def ingest_document(self, file_path: str) -> dict:
-        document = Document(file_path)
 
-        # si el documento ya existe en la base de datos, actualizamos el path y salimos
-        document_exists = self.db.document_exists(document.hash)
-        if document_exists:
-            print(f"Document with hash {document.hash} already exists in the database.")
-            self.db.update_document_path(document.hash, document.upload_path)
-            return {
-                "message": "Document already exists. Path updated.",
-                "document_already_exists": document_exists
-            }
-        else:
-            # Insertar el documento y sus páginas en la base de datos
-            result = self.db.insert_document(document)
-            # print(f"Inserted document ID: {result['document_id']} with {result['total_pages']} pages.")
-
-            # Crear embeddings y añadir a Qdrant
-            points = []
-            for p in range(document.total_pages):
-                page =  document.doc.load_page(p)
-
-                # Definir la resolución (Matrix)
-                # 300 DPI es el estándar para buena calidad en RAG visual
-                # El zoom por defecto es 72 DPI (300 / 72 = 4.166)
-                zoom = 300 / 72
-                mat = fitz.Matrix(zoom, zoom)
-
-                # Renderizar la página como imagen
-                pix = page.get_pixmap(matrix=mat)
-
-                # Converir la imagen a un formato compatible con el procesador (PIL Image)
-                image_data = pix.tobytes("png")
-                image = Image.open(BytesIO(image_data)).convert("RGB")
-                multivector = self.multivector(image)
-                points.append(PointStruct(
-                    id=str(uuid.uuid4()),
-                    vector={"colbert": multivector}, # Usamos el nombre que definiste en la colección
-                    payload={
-                        "document_id": result['document_id'],
-                        "page_number": p,
-                    }
-                ))
-
-                self.db.get_qdrant_client().upsert(
-                    collection_name="rag_collection",
-                    points=points
-                )
-
-            return {
-                "message": "Document ingested successfully.",
-                "document_id": result['document_id'],
-                "total_pages": result['total_pages'],
-                "document_already_exists": document_exists
-            }
-
-
-
-    def multivector(self, image) -> list:
+    def ingest_document(self, doc: Document, model: ColPaliModel) -> dict:
         """
-        Ingest a document using Colpali for embedding and indexing.
+        Ingest a document by storing its metadata in MariaDB and
+        adding its embeddings to Qdrant.
 
         Args:
-            image (PIL.Image): The image to ingest.
+            file_path (str): The path to the document to be ingested.
+        Returns:
+            dict: A dictionary containing the status of the ingestion process,
+                  including document ID, hash, and any relevant messages.
+        Raises:
+            Exception: If any error occurs during the ingestion process, an exception is raised with details.
         """
-
-        # Cargar el modelo y el procesador
-        model_name = "vidore/colqwen2-v1.0"
-        model = ColPali.from_pretrained(model_name, torch_dtype=torch.bfloat16, device_map="cuda")
-        processor = AutoProcessor.from_pretrained(model_name)
-
-        inputs = processor(images=image, return_tensors="pt", padding=True, truncation=True)
-
-        # Generar embeddings
-        with torch.no_grad():
-            embeddings = model(**inputs).embeddings
-
-            # ColPali devuelve un tensor (1, N, 128) o (1, N, 768) dependiendo de la versión
-            # Lo convertimos a una lista de listas (formato Multi-vector de Qdrant)
-            multivector = embeddings.cpu().float().numpy()[0].tolist()
-
-        return multivector
+        try:
+            # Verificar si el documento ya existe en MariaDB
+            existing_doc = self.db.get_document_by_hash(doc.hash)
+            if existing_doc:
+                # Si el documento ya existe, actualizar la ruta si es necesario y retornar información
+                if existing_doc.upload_path != doc.upload_path:
+                    self.db.update_document_path(doc.hash, doc.upload_path)
+                # Comprobar si el documento ya ha sido procesado y salir temprano si es así
+                if existing_doc.indexed_in_qdrant:
+                    return {
+                        "status": "ya_procesado",
+                        "hash": doc.hash,
+                        "message": "El documento ya fue procesado anteriormente."
+                    }
                 
-# TODO CODIGO DE TEST a eliminar despues
-if __name__ == "__main__":
-    from app.database import Database
+                
+            else: # Si no existe, insertar nuevo registro en base de datos
+                new_doc_id = self.db.insert_document(doc)
 
+            # Procesar el documento y agregar embeddings a Qdrant
+            points = []
+            for n_page in range(doc.total_pages):
+                page_result = doc.page_to_qdrant(n_page, model=model)
+                points.append(page_result)
+                image = page_result["image"]
+                # Guardar la imagen de la página en config.DATA_DIR/pages con el nombre {hash}_p{n_page}.png
+                image_path = Path(Config.DATA_DIR) / "pages" / f"{doc.hash}_p{fill_page_number(n_page,doc.total_pages)}.png"
+                with open(image_path, "wb") as f:
+                    f.write(image)
+
+            # Agregar el punto a Qdrant
+            self.db.get_qdrant_client().upsert(
+                collection_name="documents",
+                points=points
+            )
+            # Marcar el documento como indexado en Qdrant
+            self.db.mark_document_indexed(doc.hash)
+
+            return {
+                "status": "ingestado",
+                "hash": doc.hash,
+                "message": "Documento ingresado exitosamente."
+            }
+
+        except Exception as e:
+            raise Exception(f"Error durante la ingestión del documento: {str(e)}")                
+
+
+#  --- TESTING ---
+if __name__ == "__main__":
+    from app.classes.database import Database
+    test_file_path = "/home/jvdura/RAG-MariaDb-Qdrant/docs_prueba/IBV_Memoria_ANT-INFANTIL_IVACE24_V2.pdf"
+    doc = Document(test_file_path)
     db = Database()
     ingestion_service = IngestionService(db)
-    test_file_path = "./docs_prueba/IBV_Memoria_ANT4HEALTH_IVACE24_V2.pdf"
-    # test_file_path = "./docs_prueba/IBV_Memoria_ANT4HEALTH_IVACE24_V2.docx"  # Archivo no PDF para probar la validación
-    try:
-        resultado = ingestion_service.ingest_document(test_file_path)
-        print(f"Ingestion result: {resultado}")
-        
-    except Exception as e:
-        print(f"Error during ingestion: {e}")
+    with ColPaliModel() as model:
+        try:
+            resultado = ingestion_service.ingest_document(doc, model=model)
+            print(f"Ingestion result: {resultado}")
+            
+        except Exception as e:
+            print(f"Error during ingestion: {e}")
