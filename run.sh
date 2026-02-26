@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# 0. Arracncar docker-compose
+docker compose -f ./docker-compose.yml up -d
+
 # 1. Activar el entorno virtual de uv
 if [ -d ".venv" ]; then
     source .venv/bin/activate

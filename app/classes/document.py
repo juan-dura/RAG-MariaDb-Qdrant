@@ -188,7 +188,7 @@ class Document:
         }
 
     # --- Métodos públicos ---
-    def page_to_qdrant(self, page_number: int, model: ColPaliModel) -> dict:
+    def page_to_qdrant(self, page_number: int, model: ColPaliModel) -> PointStruct:
         """
         Convierte una página PDF a un PointStruct de Qdrant con embedding multi-vector (ColPali)
         y payload textual layout-aware (mejor que page.get_text() plano).
@@ -231,16 +231,12 @@ class Document:
                 "blocks": extracted["blocks"],
                 "tables_text": extracted["tables_text"],
                 "figure_captions": extracted["figure_captions"],
-
-                "metadata": self.metadata,
                 "device_used": model.device,
             },
         )
 
-        return {
-            "point_struct": result,
-            "image": image_data,
-        }
+        return result
+        
 
     def close(self):
         """Libera el archivo PDF."""

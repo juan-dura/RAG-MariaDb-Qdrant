@@ -3,10 +3,14 @@ from dataclasses import dataclass
 import os
 import pymysql
 import logging
+import torch
+import json
 from app.config import Config
 from app.classes.document import Document
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, MultiVectorComparator, MultiVectorConfig
+from qdrant_client.models import Distance, VectorParams, MultiVectorComparator, MultiVectorConfig, QueryResponse
+# Importamos con alias para que VS Code esté feliz y el código sea legible
+from qdrant_client.http.models.models import QueryResponse as QResponse
 
 @dataclass
 class DocumentRecord:
@@ -103,6 +107,7 @@ class Database:
                 upload_path VARCHAR(512) NOT NULL,
                 total_pages INT DEFAULT 0,
                 indexed_in_qdrant BOOLEAN DEFAULT FALSE,
+                metadata JSON, -- Campo para metadatos extra (autor, fechas, etiquetas, etc.)
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB
         """)
@@ -118,7 +123,7 @@ class Database:
         except Exception as e:
             print(f"Error al conectar a Qdrant: {e}")
         # Crear la colección si no existe
-        collection_name = "rag_collection"
+        collection_name = Config.QDRANT_COLLECTION
         try:
             self.qdrant_client.get_collection(collection_name)
         except:
@@ -126,7 +131,7 @@ class Database:
                 collection_name=collection_name,
                 vectors_config={
                     "colbert" : VectorParams(
-                        size=768,
+                        size=128, # El tamaño de los embeddings de ColPali es 128 dimensiones
                         distance=Distance.COSINE,
                         multivector_config=MultiVectorConfig(
                             comparator=MultiVectorComparator.MAX_SIM
@@ -203,20 +208,48 @@ class Database:
                 upload_path = document.upload_path
                 filename = os.path.basename(upload_path)
                 total_pages = document.total_pages
+                metadata_json = json.dumps(document.metadata) if document.metadata else None
 
                 # Insertar el documento en la tabla documents
                 query = """
-                    INSERT INTO documents (doc_hash, filename, upload_path, total_pages)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO documents (doc_hash, filename, upload_path, total_pages, metadata)
+                    VALUES (%s, %s, %s, %s, %s)
                 """
-                cursor.execute(query, (doc_hash, filename, upload_path, total_pages))
+                cursor.execute(query, (doc_hash, filename, upload_path, total_pages, metadata_json))
                 self.mariadb_connection.commit()
                 return {
                     "document_id": cursor.lastrowid,
                     "total_pages": total_pages
                 }
+            
         except Exception as e:
             self.mariadb_connection.rollback() # Si ocurre un error, revertimos la transacción para mantener la integridad de la base de datos
             logging.error(f"Error inserting document: {e}")
             raise e
+        
+    def search_pages(self, query_embedding: torch.Tensor, limit: int = 5) -> QResponse:
+        """
+        Realiza una búsqueda en Qdrant utilizando un embedding de consulta y devuelve los resultados más relevantes.
+        Args:
+            query_embedding (torch.Tensor): El embedding de consulta generado por el modelo ColPali.
+            limit (int): El número máximo de resultados a devolver.
+        Returns:
+            QueryResponse: La respuesta de la consulta con los resultados encontrados.
+        """
+        # 1. Preparar el vector para Qdrant
+        # El modelo devuelve un tensor [1, tokens, dim]. 
+        # Debemos quitar la dimensión del batch (squeeze), asegurar float32 y convertir a lista.
+        query_multivector = query_embedding.squeeze(0).cpu().float().numpy().tolist()
+
+        # 2. Ejecutar la búsqueda en Qdrant
+        # El comparador MAX_SIM configurado en _init_qdrant hará el resto
+        search_result = self.qdrant_client.query_points(
+            collection_name=Config.QDRANT_COLLECTION,
+            query=query_multivector,
+            using="colbert",  # Debe coincidir con la clave definida en _init_qdrant
+            with_payload=True,
+            limit=limit
+        )
+
+        return search_result
     

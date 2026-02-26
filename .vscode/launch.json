@@ -31,5 +31,17 @@
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal"
         }
+        ,
+        {
+            "name": "Debug main.py (modulo)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "app.main",
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        }
     ]
 }

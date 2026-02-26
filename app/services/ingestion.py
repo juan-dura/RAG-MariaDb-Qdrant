@@ -53,21 +53,15 @@ class IngestionService:
                 new_doc_id = self.db.insert_document(doc)
 
             # Procesar el documento y agregar embeddings a Qdrant
-            points = []
+            qdrant_client = self.db.get_qdrant_client()
             for n_page in range(doc.total_pages):
                 page_result = doc.page_to_qdrant(n_page, model=model)
-                points.append(page_result)
-                image = page_result["image"]
-                # Guardar la imagen de la página en config.DATA_DIR/pages con el nombre {hash}_p{n_page}.png
-                image_path = Path(Config.DATA_DIR) / "pages" / f"{doc.hash}_p{fill_page_number(n_page,doc.total_pages)}.png"
-                with open(image_path, "wb") as f:
-                    f.write(image)
-
-            # Agregar el punto a Qdrant
-            self.db.get_qdrant_client().upsert(
-                collection_name="documents",
-                points=points
-            )
+                point = page_result
+                # Subir el punto a Qdrant inmediatamente
+                qdrant_client.upsert(
+                    collection_name=Config.QDRANT_COLLECTION,
+                    points=[point]
+                )
             # Marcar el documento como indexado en Qdrant
             self.db.mark_document_indexed(doc.hash)
 
@@ -79,6 +73,7 @@ class IngestionService:
 
         except Exception as e:
             raise Exception(f"Error durante la ingestión del documento: {str(e)}")                
+
 
 
 #  --- TESTING ---

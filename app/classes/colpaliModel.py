@@ -52,6 +52,20 @@ class ColPaliModel:
             embeddings = self.model(**inputs)
         return embeddings.cpu() # Devuelve el embedding en CPU para su posterior uso
 
+    def process_text(self, text: str) -> torch.Tensor:
+        """
+        Procesa un texto (pregunta) para generar su embedding multi-vectorial.
+        Utiliza el modelo ColPali para extraer características textuales y devolver el embedding.
+        Args:
+            text (str): Texto de entrada (pregunta del usuario).
+        Returns:
+            torch.Tensor: Un tensor que representa el embedding multi-vectorial del texto.
+        """
+        inputs = self.processor(text=[text], return_tensors="pt", padding=True, truncation=True).to(self.model.device)
+        with torch.no_grad():
+            embeddings = self.model(**inputs)
+        return embeddings.cpu()  # Devuelve el embedding en CPU para su posterior uso
+    
     # --- Metodos de contexto ---
     def __enter__(self):
         return self

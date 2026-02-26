@@ -16,6 +16,9 @@ wheels/
 # documents
 docs_prueba/
 
+# Logs de la aplicación
+*.log
+
 # carpetta donde se guardan los documentos procesados
 data/
 temp/
